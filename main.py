@@ -3,7 +3,9 @@ ML Final Project — Airline Flight Delay Prediction
 ====================================================
 Dataset : https://www.kaggle.com/datasets/sriharshaeedala/airline-delay
 Target  : delay_rate = arr_del15 / arr_flights  (regression)
-Split   : time-based  —  train 2013-2020 / test 2021-2023
+Split   : time-based, pre-COVID only (all data < 2020-03-01)
+          train = all full years except the last two
+          test  = last two full years before cutoff (typically 2018–2019)
 """
 
 import warnings
@@ -14,16 +16,13 @@ import pandas as pd
 from sklearn.dummy import DummyRegressor
 from sklearn.linear_model import Ridge
 from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
-from sklearn.preprocessing import LabelEncoder
 from sklearn.metrics import mean_absolute_error, root_mean_squared_error, r2_score
 
-from data_loader import get_df
+from data_loader import get_df, COVID_CUTOFF
 
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-TRAIN_YEARS  = list(range(2013, 2021))   # 2013–2020
-TEST_YEARS   = list(range(2021, 2024))   # 2021–2023
 RANDOM_STATE = 42
 
 FEATURE_COLS = [
@@ -36,24 +35,50 @@ TARGET_COL = "delay_rate"
 
 
 # ---------------------------------------------------------------------------
-# Encode categoricals (carrier / airport) after the shared feature build
+# Encode categoricals — fit on TRAIN only to prevent leakage
 # ---------------------------------------------------------------------------
-def encode(df: pd.DataFrame) -> pd.DataFrame:
-    out = df.copy()
+def encode(train: pd.DataFrame, test: pd.DataFrame):
+    """
+    Fit label encoders on train, apply to both splits.
+    Unknown categories in test receive code -1.
+    Returns (encoded_train, encoded_test).
+    """
+    train = train.copy()
+    test  = test.copy()
     for col in ("carrier", "airport"):
-        le = LabelEncoder()
-        out[f"{col}_enc"] = le.fit_transform(out[col].astype(str))
-    return out
+        cats = train[col].astype("category").cat.categories
+        train[f"{col}_enc"] = pd.Categorical(train[col], categories=cats).codes
+        test[f"{col}_enc"]  = pd.Categorical(test[col],  categories=cats).codes
+    return train, test
 
 
 # ---------------------------------------------------------------------------
-# Split
+# Split — dynamic, based on full years available in the filtered data
 # ---------------------------------------------------------------------------
 def split(df: pd.DataFrame):
-    train = df[df["year"].isin(TRAIN_YEARS)]
-    test  = df[df["year"].isin(TEST_YEARS)]
-    print(f"Train: {len(train):,} rows  |  Test: {len(test):,} rows")
-    return train, test
+    """
+    Determine train/test windows dynamically from the pre-COVID data.
+
+    - full_years: years with all 12 months present
+    - test  = last 2 full years  (e.g. 2018–2019)
+    - train = remaining full years before that  (e.g. 2013–2017)
+    Partial years (e.g. Jan–Feb 2020) are excluded from both splits.
+    """
+    year_counts = df.groupby("year")["month"].nunique()
+    full_years  = sorted(year_counts[year_counts == 12].index.tolist())
+
+    if len(full_years) < 3:
+        raise ValueError(f"Need at least 3 full years to split; found: {full_years}")
+
+    test_years  = full_years[-2:]
+    train_years = full_years[:-2]
+
+    train = df[df["year"].isin(train_years)]
+    test  = df[df["year"].isin(test_years)]
+
+    print(f"  Train: {train_years[0]}–{train_years[-1]}  ({len(train):,} rows)")
+    print(f"  Test : {test_years[0]}–{test_years[-1]}   ({len(test):,} rows)")
+    return train, test, train_years, test_years
 
 
 # ---------------------------------------------------------------------------
@@ -75,9 +100,12 @@ def evaluate(name: str, model, X_train, y_train, X_test, y_test) -> dict:
 # Main
 # ---------------------------------------------------------------------------
 def main():
-    df = encode(get_df())
+    print(f"COVID cutoff: {COVID_CUTOFF} (data before this date only)\n")
 
-    train, test = split(df)
+    df = get_df()
+    train_raw, test_raw, train_years, test_years = split(df)
+    train, test = encode(train_raw, test_raw)
+
     X_train = train[FEATURE_COLS].fillna(0)
     y_train = train[TARGET_COL]
     X_test  = test[FEATURE_COLS].fillna(0)
@@ -90,7 +118,8 @@ def main():
         "Gradient Boosting": GradientBoostingRegressor(n_estimators=100, random_state=RANDOM_STATE),
     }
 
-    print("\n--- Model Results (test set 2021-2023) ---")
+    test_label = f"{test_years[0]}–{test_years[-1]}"
+    print(f"\n--- Model Results (test set {test_label}, pre-COVID) ---")
     results = [evaluate(name, m, X_train, y_train, X_test, y_test) for name, m in models.items()]
 
     summary = pd.DataFrame([{k: v for k, v in r.items() if k != "fitted"} for r in results])

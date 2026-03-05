@@ -8,3 +8,4 @@ jupyter
 ipykernel
 plotly>=5.15
 openpyxl
+xgboost>=2.0
