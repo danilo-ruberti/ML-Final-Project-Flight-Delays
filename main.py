@@ -149,6 +149,8 @@ def main():
         print(f"\n--- {r['model']} Feature Importances ---")
         print(imp.round(4).to_string())
 
+    return results, X_test, y_test, FEATURE_COLS
+
 
 if __name__ == "__main__":
     main()
