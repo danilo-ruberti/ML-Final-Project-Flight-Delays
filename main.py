@@ -36,6 +36,9 @@ FEATURE_COLS = [
     "year", "month_sin", "month_cos", "is_peak_season",
     "arr_flights", "cancel_rate", "divert_rate",
     "carrier_share", "weather_share", "nas_share", "late_aircraft_share",
+    "lag1_delay", "lag2_delay", "lag3_delay",
+    "rolling_arrivals_3", "rolling_late_aircraft_3", "rolling_cancel_rate_3",
+    "traffic_weather_interaction", "traffic_peak_interaction",
     "carrier_enc", "airport_enc",
 ]
 TARGET_COL = "delay_rate"
@@ -49,6 +52,18 @@ MODEL_REGISTRY = [
     (N_XGB,   build_xgb),
     (N_LGB,   build_lgb),
     (N_CAT,   build_cat),
+]
+
+
+NEW_FEATURES = [
+    "lag1_delay",
+    "lag2_delay",
+    "lag3_delay",
+    "rolling_arrivals_3",
+    "rolling_late_aircraft_3",
+    "rolling_cancel_rate_3",
+    "traffic_weather_interaction",
+    "traffic_peak_interaction",
 ]
 
 
@@ -97,6 +112,72 @@ def split(df: pd.DataFrame):
 
 
 # ---------------------------------------------------------------------------
+# Additional feature engineering (leakage-safe)
+# ---------------------------------------------------------------------------
+def add_temporal_features(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+
+    date_col = "date" if "date" in out.columns else "flight_date"
+    if date_col not in out.columns:
+        out["date"] = pd.to_datetime(out[["year", "month"]].assign(day=1))
+        date_col = "date"
+    else:
+        out[date_col] = pd.to_datetime(out[date_col], errors="coerce")
+
+    sort_cols = [date_col]
+    lag_group_cols = []
+    if "airport" in out.columns and "carrier" in out.columns:
+        lag_group_cols = ["airport", "carrier"]
+    elif "airport" in out.columns:
+        lag_group_cols = ["airport"]
+    sort_cols.extend([c for c in lag_group_cols if c not in sort_cols])
+    out = out.sort_values(sort_cols).copy()
+
+    # Lagged target history by route grouping.
+    if lag_group_cols:
+        out["lag1_delay"] = out.groupby(lag_group_cols)["delay_rate"].shift(1)
+        out["lag2_delay"] = out.groupby(lag_group_cols)["delay_rate"].shift(2)
+        out["lag3_delay"] = out.groupby(lag_group_cols)["delay_rate"].shift(3)
+    else:
+        out["lag1_delay"] = out["delay_rate"].shift(1)
+        out["lag2_delay"] = out["delay_rate"].shift(2)
+        out["lag3_delay"] = out["delay_rate"].shift(3)
+
+    # Historical rolling congestion indicators (exclude current row via shift(1)).
+    if "airport" in out.columns:
+        out["rolling_arrivals_3"] = out.groupby("airport")["arr_flights"].transform(
+            lambda s: s.shift(1).rolling(3, min_periods=3).mean()
+        )
+        out["rolling_late_aircraft_3"] = out.groupby("airport")["late_aircraft_share"].transform(
+            lambda s: s.shift(1).rolling(3, min_periods=3).mean()
+        )
+        out["rolling_cancel_rate_3"] = out.groupby("airport")["cancel_rate"].transform(
+            lambda s: s.shift(1).rolling(3, min_periods=3).mean()
+        )
+    else:
+        out["rolling_arrivals_3"] = out["arr_flights"].shift(1).rolling(3, min_periods=3).mean()
+        out["rolling_late_aircraft_3"] = (
+            out["late_aircraft_share"].shift(1).rolling(3, min_periods=3).mean()
+        )
+        out["rolling_cancel_rate_3"] = (
+            out["cancel_rate"].shift(1).rolling(3, min_periods=3).mean()
+        )
+
+    out["traffic_weather_interaction"] = out["arr_flights"] * out["weather_share"]
+    out["traffic_peak_interaction"] = out["arr_flights"] * out["is_peak_season"]
+
+    shape_before_dropna = out.shape
+    out = out.dropna().copy()
+    shape_after_dropna = out.shape
+
+    print("New features added:")
+    print(NEW_FEATURES)
+    print(f"Shape before dropna: {shape_before_dropna}")
+    print(f"Shape after dropna: {shape_after_dropna}")
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Evaluate a single model
 # ---------------------------------------------------------------------------
 def evaluate(name: str, model, X_train, y_train, X_test, y_test) -> dict:
@@ -117,7 +198,7 @@ def evaluate(name: str, model, X_train, y_train, X_test, y_test) -> dict:
 def main():
     print(f"COVID cutoff: {COVID_CUTOFF}  (only data before this date is used)\n")
 
-    df = get_df()
+    df = add_temporal_features(get_df())
     train_raw, test_raw, train_years, test_years = split(df)
     train, test = encode(train_raw, test_raw)
 
