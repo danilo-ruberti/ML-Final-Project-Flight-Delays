@@ -3,9 +3,12 @@ ML Final Project — Airline Flight Delay Prediction
 ====================================================
 Dataset : https://www.kaggle.com/datasets/sriharshaeedala/airline-delay
 Target  : delay_rate = arr_del15 / arr_flights  (regression)
-Split   : time-based, pre-COVID only (all data < 2020-03-01)
+Split   : time-based, pre-COVID only (data < 2020-03-01)
           train = all full years except the last two
           test  = last two full years before cutoff (typically 2018–2019)
+
+Run:
+    python main.py
 """
 
 import warnings
@@ -13,18 +16,22 @@ warnings.filterwarnings("ignore")
 
 import numpy as np
 import pandas as pd
-from sklearn.dummy import DummyRegressor
-from sklearn.linear_model import Ridge
-from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
 from sklearn.metrics import mean_absolute_error, root_mean_squared_error, r2_score
 
-from data_loader import get_df, COVID_CUTOFF
+from data.data_loader import get_df, COVID_CUTOFF
+
+# Individual model builders — each exposes NAME (str) and build() -> estimator
+from models.baseline.model       import NAME as N_BASE,  build as build_base
+from models.ridge.model          import NAME as N_RIDGE, build as build_ridge
+from models.random_forest.model  import NAME as N_RF,    build as build_rf
+from models.gradient_boosting.model import NAME as N_GB, build as build_gb
+from models.xgboost.model        import NAME as N_XGB,   build as build_xgb
+from models.lightgbm.model       import NAME as N_LGB,   build as build_lgb
+from models.catboost.model       import NAME as N_CAT,   build as build_cat
 
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-RANDOM_STATE = 42
-
 FEATURE_COLS = [
     "year", "month_sin", "month_cos", "is_peak_season",
     "arr_flights", "cancel_rate", "divert_rate",
@@ -32,6 +39,17 @@ FEATURE_COLS = [
     "carrier_enc", "airport_enc",
 ]
 TARGET_COL = "delay_rate"
+
+# Registry: (display_name, factory_fn)  — controls run order
+MODEL_REGISTRY = [
+    (N_BASE,  build_base),
+    (N_RIDGE, build_ridge),
+    (N_RF,    build_rf),
+    (N_GB,    build_gb),
+    (N_XGB,   build_xgb),
+    (N_LGB,   build_lgb),
+    (N_CAT,   build_cat),
+]
 
 
 # ---------------------------------------------------------------------------
@@ -53,15 +71,12 @@ def encode(train: pd.DataFrame, test: pd.DataFrame):
 
 
 # ---------------------------------------------------------------------------
-# Split — dynamic, based on full years available in the filtered data
+# Split — dynamic, based on full years in filtered data
 # ---------------------------------------------------------------------------
 def split(df: pd.DataFrame):
     """
-    Determine train/test windows dynamically from the pre-COVID data.
-
-    - full_years: years with all 12 months present
-    - test  = last 2 full years  (e.g. 2018–2019)
-    - train = remaining full years before that  (e.g. 2013–2017)
+    test  = last 2 full years (all 12 months present) before COVID cutoff
+    train = all full years before the test window
     Partial years (e.g. Jan–Feb 2020) are excluded from both splits.
     """
     year_counts = df.groupby("year")["month"].nunique()
@@ -82,7 +97,7 @@ def split(df: pd.DataFrame):
 
 
 # ---------------------------------------------------------------------------
-# Evaluate
+# Evaluate a single model
 # ---------------------------------------------------------------------------
 def evaluate(name: str, model, X_train, y_train, X_test, y_test) -> dict:
     model.fit(X_train, y_train)
@@ -100,7 +115,7 @@ def evaluate(name: str, model, X_train, y_train, X_test, y_test) -> dict:
 # Main
 # ---------------------------------------------------------------------------
 def main():
-    print(f"COVID cutoff: {COVID_CUTOFF} (data before this date only)\n")
+    print(f"COVID cutoff: {COVID_CUTOFF}  (only data before this date is used)\n")
 
     df = get_df()
     train_raw, test_raw, train_years, test_years = split(df)
@@ -111,24 +126,28 @@ def main():
     X_test  = test[FEATURE_COLS].fillna(0)
     y_test  = test[TARGET_COL]
 
-    models = {
-        "Baseline (mean)":   DummyRegressor(strategy="mean"),
-        "Ridge Regression":  Ridge(alpha=1.0),
-        "Random Forest":     RandomForestRegressor(n_estimators=100, random_state=RANDOM_STATE, n_jobs=-1),
-        "Gradient Boosting": GradientBoostingRegressor(n_estimators=100, random_state=RANDOM_STATE),
-    }
-
     test_label = f"{test_years[0]}–{test_years[-1]}"
     print(f"\n--- Model Results (test set {test_label}, pre-COVID) ---")
-    results = [evaluate(name, m, X_train, y_train, X_test, y_test) for name, m in models.items()]
+    results = [
+        evaluate(name, build(), X_train, y_train, X_test, y_test)
+        for name, build in MODEL_REGISTRY
+    ]
 
+    # Summary table
     summary = pd.DataFrame([{k: v for k, v in r.items() if k != "fitted"} for r in results])
-    print("\n" + summary.to_string(index=False))
+    summary = summary.sort_values("RMSE").reset_index(drop=True)
+    print("\n--- Summary (sorted by RMSE) ---")
+    print(summary.to_string(index=False))
 
-    best = next(r for r in results if r["model"] == "Random Forest")["fitted"]
-    imp = pd.Series(best.feature_importances_, index=FEATURE_COLS).sort_values(ascending=False)
-    print("\n--- Random Forest Feature Importances ---")
-    print(imp.round(4).to_string())
+    # Feature importances for tree-based models
+    importance_models = [r for r in results if hasattr(r["fitted"], "feature_importances_")]
+    for r in importance_models:
+        imp = (
+            pd.Series(r["fitted"].feature_importances_, index=FEATURE_COLS)
+            .sort_values(ascending=False)
+        )
+        print(f"\n--- {r['model']} Feature Importances ---")
+        print(imp.round(4).to_string())
 
 
 if __name__ == "__main__":

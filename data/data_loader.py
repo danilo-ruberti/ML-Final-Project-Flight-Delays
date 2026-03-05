@@ -1,5 +1,5 @@
 """
-Shared data loading and feature engineering used by both eda.ipynb and main.py.
+Shared data loading and feature engineering.
 
 Data is downloaded on first use via kagglehub and cached automatically at
 ~/.cache/kagglehub/datasets/sriharshaeedala/airline-delay/
